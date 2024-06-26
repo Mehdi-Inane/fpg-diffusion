@@ -6,16 +6,17 @@ from torch.nn import functional as F
 
 
 class SinusoidalEmbedding(nn.Module):
-    def __init__(self, size: int, scale: float = 1.0):
+    def __init__(self, size: int, scale: float = 1.0,device='cuda'):
         super().__init__()
+        self.device = device
         self.size = size
         self.scale = scale
 
     def forward(self, x: torch.Tensor):
         x = x * self.scale
         half_size = self.size // 2
-        emb = torch.log(torch.Tensor([10000.0])) / (half_size - 1)
-        emb = torch.exp(-emb * torch.arange(half_size))
+        emb = torch.log(torch.Tensor([10000.0]).to(self.device)) / (half_size - 1)
+        emb = torch.exp(-emb * torch.arange(half_size).to(self.device, dtype=torch.float32))
         emb = x.unsqueeze(-1) * emb.unsqueeze(0)
         emb = torch.cat((torch.sin(emb), torch.cos(emb)), dim=-1)
         return emb
@@ -39,10 +40,11 @@ class LinearEmbedding(nn.Module):
 
 
 class LearnableEmbedding(nn.Module):
-    def __init__(self, size: int):
+    def __init__(self, size: int,device='cuda'):
         super().__init__()
         self.size = size
-        self.linear = nn.Linear(1, size)
+        self.device = device
+        self.linear = nn.Linear(1, size).to(device)
 
     def forward(self, x: torch.Tensor):
         return self.linear(x.unsqueeze(-1).float() / self.size)
@@ -76,7 +78,6 @@ class ZeroEmbedding(nn.Module):
 class PositionalEmbedding(nn.Module):
     def __init__(self, size: int, type: str, **kwargs):
         super().__init__()
-
         if type == "sinusoidal":
             self.layer = SinusoidalEmbedding(size, **kwargs)
         elif type == "linear":
