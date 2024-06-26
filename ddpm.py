@@ -188,6 +188,15 @@ class NoiseScheduler():
         variance = self.betas[t] * (1. - self.alphas_cumprod_prev[t]) / (1. - self.alphas_cumprod[t])
         variance = variance.clip(1e-20)
         return variance
+    
+    def get_variance_tensor(self, t):
+        noise_mask = (t > 0)
+        if noise_mask.any():
+
+            variance = self.betas[t[noise_mask]] * (1. - self.alphas_cumprod_prev[noise_mask]) / (1. - self.alphas_cumprod[noise_mask])
+            variance = variance.clip(1e-20)
+        return variance
+
 
     def step(self, model_output, timestep, sample,deterministic=False):
         t = timestep
@@ -204,6 +213,26 @@ class NoiseScheduler():
         pred_prev_sample = pred_prev_sample + variance
 
         return pred_prev_sample
+    
+    def step_tensor(self,model_output,timestep,sample,deterministic=False):
+        t = timestep
+        pred_original_sample = self.reconstruct_x0(sample, t, model_output)
+        pred_prev_sample = self.q_posterior(pred_original_sample, sample, t)
+
+        variance = torch.zeros_like(model_output)
+
+        noise_mask = (timestep > 0)
+        if noise_mask.any():
+            noise = torch.randn_like(model_output[noise_mask])
+            if deterministic:
+                variance[noise_mask] = 0
+            else:
+                variance[noise_mask] = (self.get_variance_tensor(timestep[noise_mask]) ** 0.5) * noise
+
+        pred_prev_sample += variance
+
+        return pred_prev_sample
+
 
     def add_noise(self, x_start, x_noise, timesteps):
         s1 = self.sqrt_alphas_cumprod[timesteps]

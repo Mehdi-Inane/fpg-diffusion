@@ -53,8 +53,36 @@ def train_discriminator(discriminator,optimizer,real_train_loader,fake_train_loa
     return np.mean(avg_losses)
 
 
+def sample_trajectory_data(x_t,a_t,f_prime,action_prob,timesteps,traj_length,traj_batch=1000,time_batch=100):
+    n_trajectories = x_t[0].shape[0]
+    print(list(x_t.keys()))
+    sampled_trajectories = random.sample(list(range((n_trajectories))),time_batch)
+    trajectories = {
+        'x_t':torch.stack([x_t[i][sampled_trajectories] for i in range(traj_length)]),
+        'action':torch.stack([a_t[i][sampled_trajectories] for i in range(traj_length)]),
+        'f_t':torch.stack([f_prime[i][sampled_trajectories] for i in range(traj_length)]),
+        'action_probs':torch.stack([action_prob[i][sampled_trajectories] for i in range(traj_length)]),
+        'diff_timestep':torch.stack([timesteps[i][sampled_trajectories] for i in range(traj_length)])
+    }
+    sampled_timesteps = random.sample(range(traj_length), time_batch)
+
+    # Gather data for sampled timesteps
+    batch_data = {
+        'x_t': torch.stack([trajectories['x_t'][t] for t in sampled_timesteps]),
+        'action': torch.stack([trajectories['action'][t] for t in sampled_timesteps]),
+        'f_t': torch.stack([trajectories['f_t'][t] for t in sampled_timesteps]),
+        'f_t': torch.stack([trajectories['f_t'][t] for t in sampled_timesteps]),
+        'action_probs': torch.stack([trajectories['action_probs'][t] for t in sampled_timesteps]),
+        'diff_timestep': torch.stack([trajectories['diff_timestep'][t] for t in sampled_timesteps])
+    }
+
+    return batch_data, sampled_timesteps,sampled_trajectories
+
+
+
+
 def train_ppo(ppo_net,discriminator_net,x_t,timesteps,f_primes,actions,action_probs,optimizer,
-              n_epochs,n_trajectories_epoch,device,epsilon=1e-2,n_timesteps_sample=100):
+              n_epochs,n_trajectories_epoch,device,epsilon=1e-2,n_timesteps_sample=100,traj_length=2000):
     n_timesteps = len(timesteps)
     n_trajectories = x_t[0].shape[0]
     avg_losses = []
@@ -62,16 +90,16 @@ def train_ppo(ppo_net,discriminator_net,x_t,timesteps,f_primes,actions,action_pr
         ppo_net.train()
         discriminator_net.eval()
         avg_loss = 0
+        batch,sampled_timesteps,sampled_indices = sample_trajectory_data(x_t,actions,f_primes,action_probs,timesteps,traj_length,n_trajectories_epoch,n_timesteps_sample)
         sampled_indices = torch.randperm(n_trajectories)[:n_trajectories_epoch]
-        timesteps_ =[timesteps[i] for i in range(len(timesteps)) if timesteps[i] !=0]
-        sampled_timesteps = np.random.choice(timesteps_,n_timesteps_sample,replace=False)
-        x_t_i = torch.stack([x_t[t][sampled_indices] for t in sampled_timesteps ]).view(-1,2)
-        f_prime = torch.stack([f_primes[t][sampled_indices] for t in sampled_timesteps]).view(-1,1)
-        action = torch.stack([actions[t][sampled_indices] for t in sampled_timesteps]).view(-1,1)
-        times = torch.stack([torch.tensor(t,device=device,dtype=torch.long).repeat(n_trajectories_epoch) for t in sampled_timesteps]).to(device).view(-1,1)
+        x_t_i = torch.stack([x_t[sampled_indices][t] for t in sampled_timesteps ]).view(-1,2)
+        x_t_i = batch['x_t'].view(-1,2)
+        f_prime = batch['f_t'].view(-1,1)
+        action = batch['action'].view(-1,1)
+        times = batch['diff_timestep'].view(-1,1)
+        critic_action_prob = batch['action_probs'].view(-1,1)
         optimizer.zero_grad()
         action_prob = ppo_net.get_action_prob(x_t_i,times,action)
-        critic_action_prob = torch.stack([action_probs[t][sampled_indices] for t in sampled_timesteps]).reshape(n_timesteps_sample*n_trajectories_epoch,1)
         prob = action_prob/critic_action_prob
         loss = torch.mean(torch.min(prob*f_prime,torch.clamp(prob,1-epsilon,1+epsilon)*f_prime))
         avg_loss += loss.item()

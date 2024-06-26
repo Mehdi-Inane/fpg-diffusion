@@ -21,53 +21,68 @@ def kl_prime(x):
 
 
 
-def generate_trajectories(noise_scheduler,size,diffusion_net,discriminator,ppo_sampler,device='cuda',gamma=0.99,trajectory_length=2000):
-    num_samples,sample_dim = size
-    # Single trajectory
-    samples = torch.randn(num_samples,sample_dim).to(device)
-    timesteps = list(range(len(noise_scheduler)))[::-1]
-    print(max(timesteps))
+def generate_trajectories(noise_scheduler, size, diffusion_net, discriminator, ppo_sampler, device='cuda', gamma=0.99, trajectory_length=2000):
+    num_samples, sample_dim = size
+    samples = torch.randn(num_samples, sample_dim).to(device)
+    
+    # Initialize timesteps for each sample
+    individual_timesteps = [list(range(len(noise_scheduler)))[::-1] for _ in range(num_samples)]
+    
     x_t = {}
     x_t_1 = {}
     f_primes = {}
     actions = {}
     action_probs = {}
-    _t = timesteps.pop(0)
-    timesteps_=[]
+    timesteps = {}
+
     for i in range(trajectory_length):
-        if i == 999:
-            print('here')
-        samples = samples.to(device)
-        t = torch.from_numpy(np.repeat(_t, num_samples)).long().to(device)
+        # Create mask for samples still having timesteps
+        active_mask = [len(ts) > 0 for ts in individual_timesteps]
+        if not any(active_mask):  # If no active trajectories, break the loop
+            break
+
+        # Only consider samples that still have timesteps left
+        current_t = [ts[0] if len(ts) > 0 else -1 for ts in individual_timesteps]  # -1 for exhausted timesteps
+        t = torch.tensor(current_t, dtype=torch.long, device=device)
+
+        active_indices = torch.tensor(active_mask, device=device)
+
+        # Process only active samples
+        active_samples = samples[active_indices]
+        active_t = t[active_indices]
+
         x_t[i] = samples.detach().clone()
+
         with torch.no_grad():
-            residual = diffusion_net(samples, t.to(device))
-            density_ratio = discriminator(samples,t.to(device))
-            density_ratio = density_ratio / (1-density_ratio+1e-16)
-            f_prime = gamma**i*kl_prime(density_ratio)
-        action = ppo_sampler.get_action(samples,t.to(device))
-        action_prob = ppo_sampler.get_action_prob(samples,t.to(device),action)
+            residual = diffusion_net(active_samples, active_t)
+            density_ratio = discriminator(active_samples, active_t)
+            density_ratio = density_ratio / (1 - density_ratio + 1e-16)
+            f_prime = gamma ** i * kl_prime(density_ratio)
+
+        action = ppo_sampler.get_action(active_samples, active_t)
+        action_prob = ppo_sampler.get_action_prob(active_samples, active_t, action)
         actions[i] = action.detach().clone()
         action_probs[i] = action_prob.detach().clone()
-        ode_indices = (actions[i] == 0).squeeze()
-        timesteps_.append(_t)
-        if ode_indices.any(): # perform one step of ODE
-            samples[ode_indices] =noise_scheduler.step(residual[ode_indices], t[0], samples[ode_indices],deterministic=False)
-            _t = timesteps.pop(0)
-        noise_indices = (actions[i] == 1).squeeze()
-        if noise_indices.any():
-            noise = torch.randn_like(samples[noise_indices]).to(device)
-            times = torch.tensor(1,device=device,dtype=torch.long).repeat(samples[noise_indices].shape[0])
-            samples[noise_indices] = noise_scheduler.add_noise(samples[noise_indices],noise,times)
-        if i == len(timesteps)-1:
-            samples =noise_scheduler.step(residual, t[0], samples,deterministic=True) 
-            break
-        f_primes[i] = f_prime
+        timesteps[i] = t.detach().clone()
+
+        # Update the samples based on the actions
+        ode_indices = (action == 0).nonzero(as_tuple=True)
+        if ode_indices[0].numel() > 0:
+            samples[active_indices][ode_indices] = noise_scheduler.step_tensor(residual[ode_indices], active_t[ode_indices], active_samples[ode_indices], deterministic=True)
+            for idx in ode_indices[0]:
+                if len(individual_timesteps[active_indices.cpu().numpy()[idx]]) > 0:
+                    individual_timesteps[active_indices.cpu().numpy()[idx]].pop(0)
+
+        noise_indices = (action == 1).nonzero(as_tuple=True)
+        if noise_indices[0].numel() > 0:
+            noise = torch.randn_like(active_samples[noise_indices])
+            samples[active_indices][noise_indices] = noise_scheduler.add_noise(active_samples[noise_indices], noise, active_t[noise_indices])
+
+        f_primes[i] = f_prime.detach().clone()
         x_t_1[i] = samples.detach().clone()
-        if len(timesteps) == 0:
-            break
+
     x_0 = samples.detach().clone()
-    return x_t_1,x_t,x_0,timesteps_,f_primes,actions,action_probs
+    return x_t_1, x_t, x_0, timesteps, f_primes, actions, action_probs
 
 
 
@@ -102,6 +117,7 @@ def main():
     parser.add_argument('--ppo_time_embedding', type=str, default='sinusoidal')
     parser.add_argument('--ppo_lr', type=float, default=1e-4)
     parser.add_argument('--traj_length', type=int, default=2000)
+    parser.add_argument('--num_trajectories', type=int, default=1000)
     args = parser.parse_args()
     dataset_type = args.dataset
     print(f'Loading data ---------')
@@ -133,7 +149,7 @@ def main():
     diff_net.load_state_dict(diff_ckpt['model_state_dict'])
     discriminator_net.load_state_dict(discriminator_ckpt['model_state_dict'])
     discriminator_optimizer = Adam(discriminator_net.parameters(), lr=args.discriminator_lr)
-    noise_scheduler = NoiseScheduler()
+    noise_scheduler = NoiseScheduler(num_timesteps=100)
     ppo = PPO(emb_size=args.ppo_emb_size,time_embedding=args.ppo_time_embedding,input_size=args.ppo_input_size,hidden_layers=args.ppo_hidden_layers,output_dim=args.ppo_output_dim,device=device)
     ppo_optimizer = Adam(ppo.parameters(), lr=args.ppo_lr)
     ppo_losses = []
@@ -146,7 +162,7 @@ def main():
         if i == 0:
             plot_2d_data(fake_train_dataset,f'plots/rl_train_fake_{i}.png')
         fake_train_loader = DataLoader(fake_train_dataset,batch_size=args.batch_size,shuffle=True)
-        x_t_1,x_t,x_0,timesteps,f_primes,actions,action_probs = generate_trajectories(noise_scheduler=noise_scheduler,size=(10000,2),diffusion_net=diff_net,ppo_sampler=ppo,discriminator=discriminator_net,device=device,trajectory_length=args.traj_length)
+        x_t_1,x_t,x_0,timesteps,f_primes,actions,action_probs = generate_trajectories(noise_scheduler=noise_scheduler,size=(args.num_trajectories,2),diffusion_net=diff_net,ppo_sampler=ppo,discriminator=discriminator_net,device=device,trajectory_length=args.traj_length)
         # Train PPO
         print('Training PPO -------------------')
         ppo_loss = train_ppo(ppo,discriminator_net,x_t,timesteps,f_primes,actions,action_probs,ppo_optimizer,args.epochs,
