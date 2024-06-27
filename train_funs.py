@@ -53,10 +53,28 @@ def train_discriminator(discriminator,optimizer,real_train_loader,fake_train_loa
     return np.mean(avg_losses)
 
 
+
+
+def check_lengths(x_t,a_t,f_prime,action_prob,timesteps):
+    assert len(x_t) == len(a_t) == len(f_prime) == len(action_prob) == len(timesteps)
+    for i in range(len(x_t)):
+        try:
+            assert x_t[i].shape[0] == a_t[i].shape[0] == f_prime[i].shape[0] == action_prob[i].shape[0] == timesteps[i].shape[0]
+        except:
+            print(f"Lengths for x_t, a_t, f_prime, action_prob, timesteps at index {i} are not equal")
+            print(f'length of x_t: {x_t[i].shape[0]}')
+            print(f'length of a_t: {a_t[i].shape[0]}')
+            print(f'length of f_prime: {f_prime[i].shape[0]}')
+            print(f'length of action_prob: {action_prob[i].shape[0]}')
+            print(f'length of timesteps: {timesteps[i].shape[0]}')
+            exit()
+            return False
+    return True
+
 def sample_trajectory_data(x_t,a_t,f_prime,action_prob,timesteps,traj_length,traj_batch=1000,time_batch=100):
-    n_trajectories = x_t[0].shape[0]
-    print(list(x_t.keys()))
+    n_trajectories = a_t[0].shape[0]
     sampled_trajectories = random.sample(list(range((n_trajectories))),time_batch)
+    #print(check_lengths(x_t,a_t,f_prime,action_prob,timesteps))
     trajectories = {
         'x_t':torch.stack([x_t[i][sampled_trajectories] for i in range(traj_length)]),
         'action':torch.stack([a_t[i][sampled_trajectories] for i in range(traj_length)]),
@@ -91,8 +109,6 @@ def train_ppo(ppo_net,discriminator_net,x_t,timesteps,f_primes,actions,action_pr
         discriminator_net.eval()
         avg_loss = 0
         batch,sampled_timesteps,sampled_indices = sample_trajectory_data(x_t,actions,f_primes,action_probs,timesteps,traj_length,n_trajectories_epoch,n_timesteps_sample)
-        sampled_indices = torch.randperm(n_trajectories)[:n_trajectories_epoch]
-        x_t_i = torch.stack([x_t[sampled_indices][t] for t in sampled_timesteps ]).view(-1,2)
         x_t_i = batch['x_t'].view(-1,2)
         f_prime = batch['f_t'].view(-1,1)
         action = batch['action'].view(-1,1)

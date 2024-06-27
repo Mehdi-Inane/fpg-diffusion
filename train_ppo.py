@@ -116,10 +116,15 @@ def main():
     parser.add_argument('--ppo_input_size', type=int, default=2)
     parser.add_argument('--ppo_time_embedding', type=str, default='sinusoidal')
     parser.add_argument('--ppo_lr', type=float, default=1e-4)
-    parser.add_argument('--traj_length', type=int, default=2000)
+    parser.add_argument('--traj_length', type=int, default=200)
     parser.add_argument('--num_trajectories', type=int, default=1000)
+    parser.add_argument('--num_timesteps', type=int, default=100)
+    parser.add_argument('--seed', type=int, default=100)
     args = parser.parse_args()
     dataset_type = args.dataset
+    seed = args.seed
+    torch.manual_seed(seed)
+    np.random.seed(seed)
     print(f'Loading data ---------')
     if dataset_type == 'Gaussian_2D':
         train_dataset = DataSet(modes=args.modes, total_len=args.num_train_samples,remove=False)
@@ -132,15 +137,14 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+    device = torch.device(args.device)
     print('Loading models -------------------')
-    diff_ckpt = torch.load(args.pretrained_ckpt)
-    discriminator_ckpt = torch.load(args.discriminator_ckpt)
+    diff_ckpt = torch.load(args.pretrained_ckpt,map_location=torch.device('cpu'))
+    discriminator_ckpt = torch.load(args.discriminator_ckpt,map_location=torch.device('cpu'))
 
     # Loading models
     diff_net = MLP(input_emb=diff_ckpt['input_emb'],hidden_size=diff_ckpt['hidden_size'],
-                   emb_size=diff_ckpt['emb_size'],time_emb=diff_ckpt['time_emb'],
-                  ).to(device)
+                   emb_size=diff_ckpt['emb_size'],time_emb=diff_ckpt['time_emb'],device=device).to(device)
     
     discriminator_net = Discriminator(n_layers=discriminator_ckpt['n_layers'],hidden_size=discriminator_ckpt['hidden_size'],
                                       emb_size=discriminator_ckpt['emb_size'],time_emb=discriminator_ckpt['time_emb'],
@@ -149,7 +153,7 @@ def main():
     diff_net.load_state_dict(diff_ckpt['model_state_dict'])
     discriminator_net.load_state_dict(discriminator_ckpt['model_state_dict'])
     discriminator_optimizer = Adam(discriminator_net.parameters(), lr=args.discriminator_lr)
-    noise_scheduler = NoiseScheduler(num_timesteps=100)
+    noise_scheduler = NoiseScheduler(num_timesteps=args.num_timesteps,device=device)
     ppo = PPO(emb_size=args.ppo_emb_size,time_embedding=args.ppo_time_embedding,input_size=args.ppo_input_size,hidden_layers=args.ppo_hidden_layers,output_dim=args.ppo_output_dim,device=device)
     ppo_optimizer = Adam(ppo.parameters(), lr=args.ppo_lr)
     ppo_losses = []
@@ -163,10 +167,12 @@ def main():
             plot_2d_data(fake_train_dataset,f'plots/rl_train_fake_{i}.png')
         fake_train_loader = DataLoader(fake_train_dataset,batch_size=args.batch_size,shuffle=True)
         x_t_1,x_t,x_0,timesteps,f_primes,actions,action_probs = generate_trajectories(noise_scheduler=noise_scheduler,size=(args.num_trajectories,2),diffusion_net=diff_net,ppo_sampler=ppo,discriminator=discriminator_net,device=device,trajectory_length=args.traj_length)
+        print(f'action keys {len(list(actions.keys()))}')
+        print(f'x_t keys {len(list(x_t.keys()))}')
         # Train PPO
         print('Training PPO -------------------')
         ppo_loss = train_ppo(ppo,discriminator_net,x_t,timesteps,f_primes,actions,action_probs,ppo_optimizer,args.epochs,
-                  args.n_trajectories_epoch,device=device,epsilon=args.epsilon,n_timesteps_sample=args.n_timesteps_buffer)
+                  args.n_trajectories_epoch,device=device,epsilon=args.epsilon,n_timesteps_sample=args.n_timesteps_buffer,traj_length=args.traj_length)
         print('PPO Loss ',ppo_loss)
         # Train Discriminator
         print('Training Discriminator -------------------')
